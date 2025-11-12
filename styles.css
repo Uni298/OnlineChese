@@ -1,0 +1,73 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr 360px;
+}
+#board {
+  display: grid;
+  grid-template-columns: repeat(8, min(10vw, 72px));
+  grid-auto-rows: min(10vw, 72px);
+  place-content: center;
+  gap: 0;
+  background: #222;
+}
+.sq {
+  display: grid;
+  place-items: center;
+  font-size: calc(min(8vw, 58px));
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+}
+.light { background: #eeeed2; }
+.dark  { background: #769656; }
+.sel { outline: 4px solid #f2d; }
+.move { outline: 4px solid rgba(255,255,255,.8); }
+
+#side {
+  padding: 12px;
+  border-left: 1px solid #ddd;
+}
+.row { display: flex; gap: 8px; }
+input { flex: 1; padding: 8px; }
+button { padding: 8px 12px; }
+#log { height: 180px; overflow: auto; background: #f7f7f7; border: 1px solid #ddd; padding: 8px; font-family: ui-monospace, monospace; }
+#status { margin: 8px 0; font-weight: bold; }
+#youWrap { margin: 8px 0; font-weight: bold; }
+
+.ghost {
+  position: fixed;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 2px rgba(0,0,0,0.5));
+  animation: ghostFade 0.2s ease-out;
+}
+@keyframes ghostFade {
+  from { opacity: 0.3; transform: scale(0.98); }
+  to   { opacity: 1.0; transform: scale(1.0); }
+}
+
+/* 触った駒のパルス */
+.pulse::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 0 rgba(255, 99, 132, 0.7);
+  animation: pulse 1.2s ease-out;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 99, 132, 0.7); }
+  100% { box-shadow: 0 0 0 18px rgba(255, 99, 132, 0); }
+}
+
+/* 相手の手ハイライト（フラッシュ） */
+.flash {
+  animation: flash 0.8s ease-in-out;
+}
+@keyframes flash {
+  0% { box-shadow: 0 0 0 0 rgba(255,255,0,0.0); }
+  50% { box-shadow: 0 0 12px 2px rgba(255,255,0,0.9); }
+  100% { box-shadow: 0 0 0 0 rgba(255,255,0,0.0); }
+}
