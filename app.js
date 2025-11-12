@@ -5,7 +5,7 @@ const boardEl = document.getElementById('board');
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
 const youEl = document.getElementById('you');
-const gasUrlEl = document.getElementById('gasUrl');
+const gasUrlEl = "https://script.google.com/macros/s/AKfycbzHqBTdx79qzGCgjUgyPx0FIFGTPgzq-x_PTjg1_xpue7gQ6B6tFGlD7rQJVrGvto_p2A/exec";
 const btnMatch = document.getElementById('btnMatch');
 
 const PIECES = {
