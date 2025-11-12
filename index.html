@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>コピペチェス: ランダムマッチ（GASシグナリング）</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div id="board"></div>
+    <div id="side">
+      <h2>ランダムマッチ</h2>
+      <div class="row">
+        <input id="gasUrl" placeholder="GAS WebアプリURL" />
+        <button id="btnMatch">ランダムマッチ開始</button>
+      </div>
+      <div id="status">未接続</div>
+      <div id="youWrap">あなたの陣営: <span id="you">未設定</span></div>
+
+      <h3>手番ログ</h3>
+      <div id="log"></div>
+
+      <h3>操作</h3>
+      <p class="small">
+        マスをクリック→ハイライトされた候補へ移動。相手の手は移動元・先が強調表示されます。
+      </p>
+    </div>
+  </div>
+
+<script src="app.js"></script>
+</body>
+</html>
