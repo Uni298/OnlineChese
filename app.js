@@ -283,7 +283,7 @@ function decompressText(b64) {
 let pollTimer = null;
 
 btnMatch.onclick = async () => {
-  const gasUrl = "https://script.google.com/macros/s/AKfycbzHqBTdx79qzGCgjUgyPx0FIFGTPgzq-x_PTjg1_xpue7gQ6B6tFGlD7rQJVrGvto_p2A/exec";
+  const gasUrl = "https://script.google.com/macros/s/AKfycbw1xv0Rns78Ej08xk5upNQ2mwkObnYc71HICMibX18a4jU3BquU5AEHbFas5nzsvOnESw/exec";
   if (!gasUrl) { alert('GAS WebアプリURLを入力してください'); return; }
 
   // 自分が白側（待機者）の可能性があるので、まずオファー生成
@@ -342,17 +342,19 @@ btnMatch.onclick = async () => {
   }
 };
 
-/* ---- GAS API helper ---- */
-async function api(url, body) {
+async function api(url, params) {
+  const qs = Object.entries(params)
+    .map(([k,v]) => k + "=" + encodeURIComponent(v))
+    .join("&");
+  const fullUrl = url + "?" + qs;
+
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify(body)
-    });
-    return await res.json();
+    const res = await fetch(fullUrl);
+    const text = await res.text();
+    console.log("Raw response:", text);
+    return JSON.parse(text);
   } catch (e) {
-    console.error(e);
+    console.error("API error:", e);
     return null;
   }
 }
