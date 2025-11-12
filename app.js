@@ -1,465 +1,546 @@
 // app.js
+// 必須: ここに先ほどデプロイした GAS の公開 URL を入れてください
+const GAS_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyc_A1CaKnGeD0tpeFYBs_oWVkqW-M8dMkZFIB2HIjzbmZoVD3KkMH12fO7-ADPHxhIvw/exec"; // <<--- ここを書き換える
 
-// --------- GAS API ---------
-const api = {
-  async joinQueue(clientId) {
-    const res = await fetch(GAS_BASE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "joinQueue", clientId })
-    });
-    return res.json();
-  },
-  async leaveQueue(clientId) {
-    const res = await fetch(GAS_BASE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "leaveQueue", clientId })
-    });
-    return res.json();
-  },
-  async pollPair(clientId) {
-    const url = new URL(GAS_BASE_URL);
-    url.searchParams.set("action", "pollPair");
-    url.searchParams.set("clientId", clientId);
-    const res = await fetch(url);
-    return res.json();
-  },
-  async sendSignal(roomId, payload) {
-    const res = await fetch(GAS_BASE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "sendSignal", roomId, payload })
-    });
-    return res.json();
-  },
-  async pullSignals(roomId, since) {
-    const url = new URL(GAS_BASE_URL);
-    url.searchParams.set("action", "pullSignals");
-    url.searchParams.set("roomId", roomId);
-    url.searchParams.set("since", String(since || 0));
-    const res = await fetch(url);
-    return res.json();
-  }
+// ----- シンプルなチェス盤・ルール（クイーン取られたら敗北） -----
+// 駒は Unicode で表示（画像不要）
+const PIECES = {
+  pw: '♙', rw: '♖', nw: '♘', bw:'♗', qw:'♕', kw:'♔',
+  pb: '♟', rb: '♜', nb: '♞', bb:'♝', qb:'♛', kb:'♚'
 };
 
-// --------- UI refs ---------
-const boardEl = document.getElementById("board");
-const moveLogEl = document.getElementById("moveLog");
-const matchBtn = document.getElementById("matchBtn");
-const leaveBtn = document.getElementById("leaveBtn");
-const connStateEl = document.getElementById("connState");
-const mySideEl = document.getElementById("mySide");
-const opponentSideEl = document.getElementById("opponentSide");
-const turnDisplayEl = document.getElementById("turnDisplay");
-const lastOpponentMoveEl = document.getElementById("lastOpponentMove");
+// 初期配置（簡易配列 -- white bottom）
+const START_FEN = [
+  ['rb','nb','bb','qb','kb','bb','nb','rb'],
+  ['pb','pb','pb','pb','pb','pb','pb','pb'],
+  ['','','','','','','',''],
+  ['','','','','','','',''],
+  ['','','','','','','',''],
+  ['','','','','','','',''],
+  ['pw','pw','pw','pw','pw','pw','pw','pw'],
+  ['rw','nw','bw','qw','kw','bw','nw','rw']
+];
 
-// --------- State ---------
-const clientId = `c_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
-let roomId = null;
-let mySide = null; // "white" or "black"
-let turn = "white";
-let rtc = null;
-let dc = null;
-let pollTimer = null;
-let signalTimer = null;
-let signalClock = 0;
+// DOM refs
+const boardEl = document.getElementById('board');
+const logEl = document.getElementById('log');
+const statusText = document.getElementById('statusText');
+const turnText = document.getElementById('turnText');
+const peerInfo = document.getElementById('peerInfo');
+const btnFind = document.getElementById('btnFind');
 
-const FILES = {
-  // Unicode-like labels for pieces
-  // For simplicity using letters: K,Q,R,B,N,P with side-based styling
-  // Coordinates: 0..7 x 0..7 (rows, cols), 'a1' at white's left-bottom
-};
+let boardState = []; // 8x8 strings like 'pw','qb', or ''
+let pieceEls = {}; // mapping pos 'e4' -> element
+let selected = null;
+let legalMoves = [];
+let myColor = null; // 'w' or 'b'
+let myTurn = false;
+let pc = null;
+let dataChannel = null;
+let currentPairId = null;
+let mySessionId = null;
+let remoteMeta = null;
 
-let game = {
-  board: [], // 8x8 squares { piece: {type:'K','Q','R','B','N','P', side:'white'|'black'} | null }
-  lastMove: null,
-  finished: false,
-};
-
-// --------- Helpers ---------
-function xyToSquare(r, c) { return `${String.fromCharCode(97 + c)}${8 - r}`; }
-function squareToXY(sq) {
-  const c = sq.charCodeAt(0) - 97;
-  const r = 8 - parseInt(sq[1], 10);
-  return { r, c };
+function coordToIndex(x,y){ return {r:y, c:x}; }
+function idxToPos(r,c){
+  const files = ['a','b','c','d','e','f','g','h'];
+  return files[c] + (8 - r);
 }
-function addLog(text) {
-  const li = document.createElement("li");
-  li.textContent = text;
-  moveLogEl.prepend(li);
-}
-function setConnState(text) { connStateEl.textContent = text; }
-function setTurnDisplay() { turnDisplayEl.textContent = game.finished ? "終了" : (turn === mySide ? "あなた" : "相手"); }
-
-// --------- Board init & render ---------
-function initBoard() {
-  game.board = Array.from({ length: 8 }, () => Array(8).fill(null));
-  // Place pieces
-  const back = ["R","N","B","Q","K","B","N","R"];
-  // White
-  for (let c=0;c<8;c++) {
-    game.board[6][c] = { type: "P", side: "white" }; // row 6 -> rank 2
-    game.board[7][c] = { type: back[c], side: "white" };
-  }
-  // Black
-  for (let c=0;c<8;c++) {
-    game.board[1][c] = { type: "P", side: "black" }; // row 1 -> rank 7
-    game.board[0][c] = { type: back[c], side: "black" };
-  }
-  game.lastMove = null;
-  game.finished = false;
-  turn = "white";
+function posToRC(pos){
+  const files = {'a':0,'b':1,'c':2,'d':3,'e':4,'f':5,'g':6,'h':7};
+  return {r:8 - parseInt(pos[1]), c: files[pos[0]]};
 }
 
-function renderBoard() {
-  boardEl.innerHTML = "";
-  for (let r=0;r<8;r++) {
-    for (let c=0;c<8;c++) {
-      const sq = document.createElement("div");
-      const isDark = (r + c) % 2 === 1;
-      sq.className = `square ${isDark ? "dark" : "light"}`;
-      sq.dataset.r = r; sq.dataset.c = c; sq.dataset.square = xyToSquare(r,c);
+function initBoardFromStart(){
+  boardState = JSON.parse(JSON.stringify(START_FEN));
+  renderBoard();
+  log("ボード初期化");
+  turnText.innerText = '—';
+  statusText.innerText = '準備';
+}
 
-      // last move highlight
-      if (game.lastMove && (game.lastMove.from.r === r && game.lastMove.from.c === c || game.lastMove.to.r === r && game.lastMove.to.c === c)) {
-        sq.classList.add("highlight-move");
-      }
-
-      const cell = game.board[r][c];
-      if (cell) {
-        const piece = document.createElement("div");
-        piece.className = `piece ${cell.side}`;
-        piece.textContent = cell.type;
-        piece.dataset.type = cell.type;
-        piece.dataset.side = cell.side;
-        piece.dataset.r = r; piece.dataset.c = c;
-        sq.appendChild(piece);
-      }
+function renderBoard(){
+  boardEl.innerHTML = '';
+  pieceEls = {};
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const sq = document.createElement('div');
+      sq.className = 'square ' + (((r+c)%2===0) ? 'light' : 'dark');
+      sq.dataset.r = r; sq.dataset.c = c;
+      const pos = idxToPos(r,c);
+      sq.dataset.pos = pos;
+      sq.addEventListener('click', onSquareClick);
       boardEl.appendChild(sq);
+
+      const piece = boardState[r][c];
+      if (piece){
+        const p = document.createElement('div');
+        p.className = 'piece';
+        p.innerText = PIECES[piece];
+        p.dataset.piece = piece;
+        p.dataset.pos = pos;
+        // position via absolute transform
+        const size = boardEl.clientWidth / 8;
+        p.style.width = size + 'px';
+        p.style.height = size + 'px';
+        // compute initial coordinates
+        const left = (c * size);
+        const top = (r * size);
+        p.style.transform = `translate(${left}px, ${top}px)`;
+        p.style.left = '0'; p.style.top = '0';
+        p.style.position = 'absolute';
+        p.addEventListener('click', (ev)=>{
+          ev.stopPropagation();
+          onPieceClick(p);
+        });
+        boardEl.appendChild(p);
+        pieceEls[pos] = p;
+      }
     }
   }
 }
 
-// --------- Move generation (simplified, no check rules, legal paths respected) ---------
-function inBounds(r,c) { return r>=0 && r<8 && c>=0 && c<8; }
-function pieceAt(r,c) { return inBounds(r,c) ? game.board[r][c] : null; }
-
-function generateMoves(r, c) {
-  const p = pieceAt(r,c);
-  if (!p || p.side !== turn) return [];
+// ----- 簡易ムーブ生成（全ルールは未実装） -----
+// ポーン（前進1, 2初回, 斜め取る）/ ナイト / ビショップ/ ルーク/ クイーン/ キング（隣1）
+// チェックの概念は無く、キングが取られても特別扱いなし。勝利は「相手のクイーンが取られた」だけ判定。
+function isInside(r,c){ return r>=0 && r<8 && c>=0 && c<8; }
+function pieceColor(piece){ return piece ? piece[1] : null; }
+function generateMovesFor(pos){
+  // pos like 'e2'
+  const rc = posToRC(pos);
+  const r = rc.r, c = rc.c;
+  const piece = boardState[r][c];
+  if(!piece) return [];
+  const color = piece[1]; // 'w' or 'b'
   const moves = [];
-  const pushMove = (nr,nc, capture=false) => {
-    moves.push({ from:{r,c}, to:{r:nr,c:nc}, capture });
+  const dir = (color==='w') ? -1 : 1;
+
+  const addIf = (rr,cc) => {
+    if(!isInside(rr,cc)) return;
+    const target = boardState[rr][cc];
+    if(!target || pieceColor(target)!==color) moves.push(idxToPos(rr,cc));
   };
-  const ray = (dirs) => {
-    for (const [dr,dc] of dirs) {
-      let nr=r+dr, nc=c+dc;
-      while (inBounds(nr,nc)) {
-        const o = pieceAt(nr,nc);
-        if (!o) { pushMove(nr,nc,false); }
-        else {
-          if (o.side !== p.side) pushMove(nr,nc,true);
-          break;
-        }
-        nr+=dr; nc+=dc;
+
+  const type = piece[0];
+  if(type==='p'){ // pawn
+    const oneR = r + dir;
+    if(isInside(oneR,c) && !boardState[oneR][c]) {
+      moves.push(idxToPos(oneR,c));
+      // start double
+      if ((color==='w' && r===6) || (color==='b' && r===1)){
+        const twoR = r + dir*2;
+        if(isInside(twoR,c) && !boardState[twoR][c]) moves.push(idxToPos(twoR,c));
       }
     }
-  };
-
-  if (p.type === "P") {
-    const dir = p.side === "white" ? -1 : 1;
-    const startRow = p.side === "white" ? 6 : 1;
-    const nr = r + dir;
-
-    if (inBounds(nr,c) && !pieceAt(nr,c)) pushMove(nr,c,false);
-    // double move
-    if (r === startRow && !pieceAt(nr,c) && !pieceAt(r + 2*dir, c)) pushMove(r + 2*dir, c, false);
     // captures
-    for (const dc of [-1, 1]) {
-      const nc = c + dc;
-      if (inBounds(nr,nc)) {
-        const o = pieceAt(nr,nc);
-        if (o && o.side !== p.side) pushMove(nr,nc,true);
+    for(const dc of [-1,1]){
+      const rr = r + dir, cc = c + dc;
+      if(isInside(rr,cc) && boardState[rr][cc] && pieceColor(boardState[rr][cc])!==color){
+        moves.push(idxToPos(rr,cc));
       }
     }
-  } else if (p.type === "N") {
-    const jumps = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
-    for (const [dr,dc] of jumps) {
-      const nr=r+dr, nc=c+dc;
-      if (!inBounds(nr,nc)) continue;
-      const o = pieceAt(nr,nc);
-      if (!o) pushMove(nr,nc,false);
-      else if (o.side !== p.side) pushMove(nr,nc,true);
+  } else if(type==='n'){ // knight
+    const deltas = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+    for(const d of deltas) addIf(r+d[0], c+d[1]);
+  } else if(type==='b' || type==='r' || type==='q'){
+    const dirs = [];
+    if(type==='b' || type==='q') dirs.push([-1,-1],[-1,1],[1,-1],[1,1]);
+    if(type==='r' || type==='q') dirs.push([-1,0],[1,0],[0,-1],[0,1]);
+    for(const d of dirs){
+      let rr = r + d[0], cc = c + d[1];
+      while(isInside(rr,cc)){
+        if(!boardState[rr][cc]) { moves.push(idxToPos(rr,cc)); rr+=d[0]; cc+=d[1]; continue;}
+        if(pieceColor(boardState[rr][cc])!==color) moves.push(idxToPos(rr,cc));
+        break;
+      }
     }
-  } else if (p.type === "B") {
-    ray([[1,1],[1,-1],[-1,1],[-1,-1]]);
-  } else if (p.type === "R") {
-    ray([[1,0],[-1,0],[0,1],[0,-1]]);
-  } else if (p.type === "Q") {
-    ray([[1,1],[1,-1],[-1,1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]]);
-  } else if (p.type === "K") {
-    const steps = [[1,1],[1,-1],[-1,1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
-    for (const [dr,dc] of steps) {
-      const nr=r+dr, nc=c+dc;
-      if (!inBounds(nr,nc)) continue;
-      const o = pieceAt(nr,nc);
-      if (!o) pushMove(nr,nc,false);
-      else if (o.side !== p.side) pushMove(nr,nc,true);
+  } else if(type==='k'){
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(dr===0 && dc===0) continue;
+      addIf(r+dr,c+dc);
     }
   }
   return moves;
 }
 
-// --------- Interaction ---------
-let selected = null;
-let legalMoves = [];
-
-function clearHighlights() {
-  for (const sq of boardEl.querySelectorAll(".square")) {
-    sq.classList.remove("highlight-legal","highlight-capture");
-  }
-}
-
-function highlightMoves(moves) {
+// ----- UI interaction -----
+function onPieceClick(el){
+  const piece = el.dataset.piece;
+  const pos = el.dataset.pos;
+  if(!myTurn) return;
+  if(!piece) return;
+  if(piece[1] !== myColor) return; // not our piece
+  selected = pos;
   clearHighlights();
-  for (const m of moves) {
-    const sel = boardEl.querySelector(`.square[data-r="${m.to.r}"][data-c="${m.to.c}"]`);
-    if (!sel) continue;
-    sel.classList.add(m.capture ? "highlight-capture" : "highlight-legal");
-  }
+  legalMoves = generateMovesFor(pos);
+  highlightMoves(legalMoves);
 }
-
-function onSquareClick(e) {
-  if (game.finished) return;
-  const sq = e.currentTarget;
-  const r = Number(sq.dataset.r), c = Number(sq.dataset.c);
-  const cell = pieceAt(r,c);
-
-  // Your turn only
-  if (turn !== mySide) return;
-
-  if (!selected) {
-    if (cell && cell.side === mySide) {
-      selected = { r, c };
-      legalMoves = generateMoves(r,c);
-      highlightMoves(legalMoves);
-    }
-    return;
-  } else {
-    const target = { r, c };
-    const chosen = legalMoves.find(m => m.to.r === target.r && m.to.c === target.c);
-    if (chosen) {
-      performMove(chosen, true); // local
+function onSquareClick(ev){
+  const sq = ev.currentTarget;
+  const pos = sq.dataset.pos;
+  if(selected){
+    if(legalMoves.includes(pos)){
+      attemptMove(selected, pos);
       selected = null;
-      legalMoves = [];
       clearHighlights();
     } else {
-      // reselect if clicked own piece
-      if (cell && cell.side === mySide) {
-        selected = { r, c };
-        legalMoves = generateMoves(r,c);
-        highlightMoves(legalMoves);
-      } else {
-        selected = null;
-        legalMoves = [];
-        clearHighlights();
-      }
+      selected = null;
+      clearHighlights();
     }
   }
 }
 
-function performMove(move, send) {
-  const fromCell = game.board[move.from.r][move.from.c];
-  const toCell = game.board[move.to.r][move.to.c];
-
-  const captured = toCell ? toCell.type : null;
-  const movingPiece = fromCell;
-
-  // Animation: brief lift at source, then fade target if capture
-  const fromEl = boardEl.querySelector(`.square[data-r="${move.from.r}"][data-c="${move.from.c}"] .piece`);
-  const toSquareEl = boardEl.querySelector(`.square[data-r="${move.to.r}"][data-c="${move.to.c}"]`);
-  if (fromEl) fromEl.classList.add("moving");
-  if (toCell) toSquareEl.classList.add("highlight-capture");
-
-  // Apply move
-  game.board[move.to.r][move.to.c] = movingPiece;
-  game.board[move.from.r][move.from.c] = null;
-
-  // Pawn promotion to queen (auto) if reaches end
-  if (movingPiece.type === "P") {
-    if (movingPiece.side === "white" && move.to.r === 0) movingPiece.type = "Q";
-    if (movingPiece.side === "black" && move.to.r === 7) movingPiece.type = "Q";
+function highlightMoves(moves){
+  for(const m of moves){
+    const el = findSquareEl(m);
+    if(el) el.classList.add('legal');
   }
+}
+function clearHighlights(){
+  document.querySelectorAll('.square.legal').forEach(s=>s.classList.remove('legal'));
+}
 
-  game.lastMove = move;
-  renderBoard();
+function findSquareEl(pos){
+  return document.querySelector(`.square[data-pos="${pos}"]`);
+}
+function findPieceEl(pos){
+  return pieceEls[pos] || null;
+}
 
-  // Log
-  const fromSq = xyToSquare(move.from.r, move.from.c);
-  const toSq = xyToSquare(move.to.r, move.to.c);
-  addLog(`${turn} ${movingPiece.type} ${fromSq} -> ${toSq}${captured ? ` (x ${captured})` : ""}`);
+function attemptMove(from, to){
+  // local validation already performed; perform move locally, animate, then send to peer
+  const fr = posToRC(from).r, fc = posToRC(from).c;
+  const tr = posToRC(to).r, tc = posToRC(to).c;
+  const moving = boardState[fr][fc];
+  const captured = boardState[tr][tc];
+  // execute
+  boardState[tr][tc] = moving;
+  boardState[fr][fc] = '';
+  animateMove(from, to, () => {
+    // update mapping
+    const el = pieceEls[from];
+    delete pieceEls[from];
+    if(el){
+      el.dataset.pos = to;
+      pieceEls[to] = el;
+    }
+    // if captured remove element
+    if(captured){
+      const capEl = findPieceEl(to);
+      if(capEl && capEl !== el) capEl.remove();
+    }
+    // turn toggle
+    myTurn = false;
+    updateTurnUI();
+    log(`あなた: ${from} → ${to}`);
+    // send to peer
+    sendMessage({t:'move', from, to, piece:moving, captured});
+    checkQueenCapture(captured, 'you');
+  });
+}
 
-  // End condition: queen captured
-  if (captured === "Q") {
-    game.finished = true;
-    setTurnDisplay();
-    addLog(`ゲーム終了: ${turn} により相手のクイーンを捕獲`);
-    alert(`${turn === mySide ? "勝利！" : "敗北…"} クイーンが取られました`);
+function animateMove(from, to, cb){
+  const el = findPieceEl(from);
+  if(!el){ cb(); return; }
+  const size = boardEl.clientWidth / 8;
+  const rcFrom = posToRC(from), rcTo = posToRC(to);
+  const left = rcTo.c * size, top = rcTo.r * size;
+  // transition via transform
+  el.style.transition = 'transform 420ms cubic-bezier(.2,.8,.2,1)';
+  requestAnimationFrame(()=>{
+    el.style.transform = `translate(${left}px, ${top}px)`;
+  });
+  setTimeout(()=>{
+    el.style.transition = '';
+    cb();
+  }, 430);
+}
+
+function applyRemoteMove(from,to,piece,captured){
+  // update state and animate piece from remote
+  const fr = posToRC(from).r, fc = posToRC(from).c;
+  const tr = posToRC(to).r, tc = posToRC(to).c;
+  boardState[tr][tc] = piece;
+  boardState[fr][fc] = '';
+  // move element (if present)
+  const el = pieceEls[from];
+  if(el){
+    delete pieceEls[from];
+    el.dataset.pos = to;
+    pieceEls[to] = el;
+    animateMove(from,to, ()=>{
+      log(`相手: ${from} → ${to}`);
+      if(captured){
+        const cap = findPieceEl(to);
+        if(cap && cap !== el) cap.remove();
+      }
+    });
   } else {
-    // Switch turn
-    turn = turn === "white" ? "black" : "white";
-    setTurnDisplay();
+    // fallback: re-render
+    renderBoard();
   }
+  myTurn = true;
+  updateTurnUI();
+  checkQueenCapture(captured, 'opponent');
+}
 
-  // Broadcast to peer
-  if (send && dc && dc.readyState === "open") {
-    dc.send(JSON.stringify({ type: "move", move }));
+function checkQueenCapture(captured, by){
+  if(captured && captured[0]==='q'){
+    if(by==='you'){
+      alert('あなたが相手のクイーンを取ったため、あなたの勝ちです！');
+      statusText.innerText = '勝ち（クイーン捕獲）';
+    } else {
+      alert('あなたのクイーンが取られました。あなたの負けです。');
+      statusText.innerText = '負け（クイーン捕獲）';
+    }
+    sendMessage({t:'gameOver', who: by});
   }
 }
 
-// --------- P2P (WebRTC) ----------
-async function createPeer(isInitiator) {
-  rtc = new RTCPeerConnection({
-    iceServers: [
-      { urls: ["stun:stun.l.google.com:19302"] }
-    ]
-  });
+function log(s){
+  const d = document.createElement('div');
+  d.innerText = `[${new Date().toLocaleTimeString()}] ${s}`;
+  logEl.prepend(d);
+}
 
-  // Data channel
-  if (isInitiator) {
-    dc = rtc.createDataChannel("game");
+// ----- WebRTC & GAS シグナリング（簡易） -----
+async function createPeerConnection(isInitiator){
+  pc = new RTCPeerConnection();
+  // data channel
+  if(isInitiator){
+    dataChannel = pc.createDataChannel('moves');
     setupDataChannel();
   } else {
-    rtc.ondatachannel = (e) => {
-      dc = e.channel;
+    pc.ondatachannel = (e)=>{
+      dataChannel = e.channel;
       setupDataChannel();
     };
   }
 
-  rtc.onicecandidate = async (e) => {
-    if (e.candidate) {
-      await api.sendSignal(roomId, { kind: "ice", candidate: e.candidate });
+  // gather ICE finished? we rely on full SDP after gathering finished
+  // listen for connection state
+  pc.onconnectionstatechange = ()=> {
+    log('PC state: ' + pc.connectionState);
+    statusText.innerText = '接続: ' + pc.connectionState;
+  };
+  pc.onicecandidateerror = (e)=>console.warn(e);
+
+}
+
+function setupDataChannel(){
+  dataChannel.onopen = ()=> {
+    log('DataChannel open');
+    statusText.innerText = '接続済み';
+    peerInfo.innerText = `対戦相手: ${remoteMeta ? (remoteMeta.name||'相手') : '相手'}`;
+  };
+  dataChannel.onmessage = (ev)=>{
+    try {
+      const msg = JSON.parse(ev.data);
+      if(msg.t==='move'){
+        applyRemoteMove(msg.from, msg.to, msg.piece, msg.captured);
+      } else if(msg.t==='meta'){
+        remoteMeta = msg.meta;
+        peerInfo.innerText = `対戦相手: ${remoteMeta.name || '相手'}`;
+      } else if(msg.t==='gameOver'){
+        log('ゲーム終了: ' + msg.who);
+      }
+    } catch(e){
+      console.error(e);
     }
   };
+}
 
-  rtc.onconnectionstatechange = () => {
-    setConnState(rtc.connectionState);
-  };
+async function gatherLocalSDPAndWaitForIce(pc){
+  // createOffer/setLocalDescription should be done by caller.
+  // Wait for iceGatheringState === 'complete'
+  if (pc.iceGatheringState === 'complete') return pc.localDescription.sdp;
+  await new Promise((res) => {
+    function check() {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', check);
+        res();
+      }
+    }
+    pc.addEventListener('icegatheringstatechange', check);
+    // safety timeout
+    setTimeout(()=>res(), 8000);
+  });
+  return pc.localDescription.sdp;
+}
 
-  if (isInitiator) {
-    const offer = await rtc.createOffer();
-    await rtc.setLocalDescription(offer);
-    await api.sendSignal(roomId, { kind: "offer", sdp: offer });
+// GAS helper functions
+async function postToGAS(obj){
+  const res = await fetch(GAS_WEBAPP_URL, {
+    method:'POST',
+    mode:'cors',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(obj)
+  });
+  return res.json();
+}
+
+async function findRandomMatch(){
+  statusText.innerText = 'マッチ探し中...';
+  log('ランダムマッチを探します...');
+  // create local metadata
+  const meta = {name: '匿名_' + Math.floor(Math.random()*1000), ts: Date.now()};
+  // act as initiator: create offer, post as waiting
+  await createPeerConnection(true);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  // wait ice gather
+  const fullSDP = await gatherLocalSDPAndWaitForIce(pc);
+  // post to GAS
+  const post = await postToGAS({action:'createOffer', offer: fullSDP, meta});
+  mySessionId = post.id;
+  // now poll for waiting slot taken by someone else
+  statusText.innerText = '待機中（相手が参加するのを待機）';
+  log('待機作成: ' + mySessionId);
+  // Poll loop to check if someone claimed our waiting (GAS will remove waiting and create pair)
+  const pol = setInterval(async ()=>{
+    try {
+      // check waiting (we want to see if someone claimed it by being removed from waiting and registering pair)
+      const chk = await postToGAS({action:'checkWaiting', skipId: null});
+      // If returned found and it's our session id means still waiting; otherwise check around: try to find pair by polling known pairs is hard.
+      // Simpler approach: second player will claim waiting and create a pair; so we will poll for pairs by attempting to get pair id? But client doesn't know pair id.
+      // Workaround: we instead let joiner call claimSession which returns pairId and then both clients will poll for it. To inform initiator, joiner will POST answer to pairId and initiator polls pairId.
+      // So we need to poll by pairId — but initiator doesn't know pairId. Modify flow: when joiner claims, GAS will store pair under pairId and delete waiting; initiator must poll globally? Simpler: initiator will poll every few seconds to see if waiting no longer equals our session id -> then attempt to retrieve newest pair by scanning properties isn't possible.
+      // Practical simpler flow: When joiner finds waiting, joiner will POST answer and then also call postToGAS({action:'postAnswer', pairId: pairId, answer: answer}) and initiator will instead poll pollAnswer by pairId. But initiator needs pairId. To get pairId, change flow: when joiner claims waiting, GAS returns pairId. But initiator didn't request it. So we implement: when joiner claims, they will set pairId into a shared property with key 'pair_for_' + waiting.id so initiator can poll that key. We'll rely on that key existing.
+      // ========== Below: initiator polls for key "pair_for_<mySessionId>" ==========
+      const info = await postToGAS({action:'getPair', pairId: 'pair_for_' + mySessionId});
+      if(info && info.status==='ok' && info.pair && info.pair.answer){
+        // we have the answer
+        clearInterval(pol);
+        const answerSDP = info.pair.answer;
+        await pc.setRemoteDescription({type:'answer', sdp: answerSDP});
+        log('リモートアンサーを受信して接続開始');
+        statusText.innerText = '相手と接続中...';
+        return;
+      }
+    } catch(e){ console.warn(e); }
+  }, 1500);
+
+  // As backup: after 60s, cancel
+  setTimeout(()=>{ clearInterval(pol); }, 60000);
+}
+
+async function joinRandomMatch(){
+  statusText.innerText = 'マッチ探索（join）...';
+  // Poll to get waiting session
+  const myself = {name: '匿名_' + Math.floor(Math.random()*1000)};
+  let found = null;
+  for(let i=0;i<40;i++){
+    const res = await postToGAS({action:'checkWaiting', skipId: null});
+    if(res.status==='found'){
+      found = res.session; break;
+    }
+    await new Promise(r=>setTimeout(r,1000));
   }
+  if(!found){
+    statusText.innerText = '誰も見つかりませんでした。もう一度試してください。';
+    return;
+  }
+  log('相手を発見: ' + found.id);
+  // create pc as joiner
+  await createPeerConnection(false);
+  // set remote offer
+  await pc.setRemoteDescription({type:'offer', sdp: found.offer});
+  // create answer
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  const fullSDP = await gatherLocalSDPAndWaitForIce(pc);
+  // claim session (store pair)
+  const claim = await postToGAS({action:'claimSession', answer: fullSDP, pairId: null});
+  if(claim.status !== 'ok'){
+    statusText.innerText = 'セッション取得に失敗しました';
+    return;
+  }
+  const pairId = claim.pairId;
+  // write a helper property so initiator can find pair: pair_for_<waiting.id> => {pair with answer}
+  await postToGAS({action:'postAnswer', pairId: 'pair_for_' + found.id, answer: fullSDP});
+  log('参加完了: pairId=' + pairId);
+  // send our meta after data channel opens
+  myColor = 'b'; myTurn = false; updateTurnUI();
+  sendAfterChannelOpen({t:'meta', meta: myself});
 }
 
-function setupDataChannel() {
-  dc.onopen = () => { setConnState("接続"); };
-  dc.onclose = () => { setConnState("切断"); };
-  dc.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    if (data.type === "move") {
-      // Opponent move
-      lastOpponentMoveEl.textContent = `${xyToSquare(data.move.from.r, data.move.from.c)} -> ${xyToSquare(data.move.to.r, data.move.to.c)}`;
-      performMove(data.move, false);
-    }
-  };
-}
-
-// Poll signals and apply
-async function startSignalPolling() {
-  signalTimer = setInterval(async () => {
-    if (!roomId) return;
-    const res = await api.pullSignals(roomId, signalClock);
-    if (!res.ok) return;
-    signalClock = res.now;
-
-    for (const s of res.signals) {
-      const payload = s.payload;
-      if (payload.kind === "offer" && !rtc.currentRemoteDescription) {
-        await rtc.setRemoteDescription(payload.sdp);
-        const answer = await rtc.createAnswer();
-        await rtc.setLocalDescription(answer);
-        await api.sendSignal(roomId, { kind: "answer", sdp: answer });
-      } else if (payload.kind === "answer" && !rtc.currentRemoteDescription) {
-        await rtc.setRemoteDescription(payload.sdp);
-      } else if (payload.kind === "ice") {
-        try { await rtc.addIceCandidate(payload.candidate); } catch {}
-      }
-    }
-  }, 500);
-}
-
-// --------- Matchmaking flow ----------
-async function startRandomMatch() {
-  setConnState("待機中…");
-  await api.leaveQueue(clientId); // reset any stale
-  const res = await api.joinQueue(clientId);
-
-  if (res.ok && res.waiting) {
-    mySide = null;
-    mySideEl.textContent = "-";
-    opponentSideEl.textContent = "-";
-    // poll pair
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-      const p = await api.pollPair(clientId);
-      if (p.ok && p.roomId) {
-        clearInterval(pollTimer);
-        roomId = p.roomId;
-        mySide = p.side;
-        initBoard();
-        renderBoard();
-        wireBoardClicks();
-        mySideEl.textContent = mySide;
-        opponentSideEl.textContent = mySide === "white" ? "black" : "white";
-        setTurnDisplay();
-
-        const isInitiator = mySide === "white"; // white initiates offer
-        await createPeer(isInitiator);
-        startSignalPolling();
-      }
-    }, 600);
-  } else if (res.ok && res.roomId) {
-    // immediately paired
-    roomId = res.roomId;
-    mySide = res.side;
-    initBoard(); renderBoard(); wireBoardClicks();
-    mySideEl.textContent = mySide;
-    opponentSideEl.textContent = mySide === "white" ? "black" : "white";
-    setTurnDisplay();
-    const isInitiator = mySide === "white";
-    await createPeer(isInitiator);
-    startSignalPolling();
+function sendAfterChannelOpen(obj){
+  const s = JSON.stringify(obj);
+  if(dataChannel && dataChannel.readyState === 'open') {
+    dataChannel.send(s);
   } else {
-    setConnState("エラー");
-    alert("マッチ開始に失敗しました");
+    const iv = setInterval(()=>{
+      if(dataChannel && dataChannel.readyState === 'open'){
+        clearInterval(iv);
+        dataChannel.send(s);
+      }
+    },200);
   }
 }
 
-function wireBoardClicks() {
-  for (const sq of boardEl.querySelectorAll(".square")) {
-    sq.addEventListener("click", onSquareClick);
+function sendMessage(obj){
+  if(!dataChannel || dataChannel.readyState!=='open') {
+    log('メッセージ送信失敗: 未接続');
+    return;
   }
+  dataChannel.send(JSON.stringify(obj));
 }
 
-// --------- Buttons ----------
-matchBtn.addEventListener("click", startRandomMatch);
-leaveBtn.addEventListener("click", async () => {
-  await api.leaveQueue(clientId);
-  if (pollTimer) clearInterval(pollTimer);
-  if (signalTimer) clearInterval(signalTimer);
-  setConnState("未接続");
-  roomId = null; mySide = null;
-  mySideEl.textContent = "-"; opponentSideEl.textContent = "-";
-  turnDisplayEl.textContent = "-";
-  moveLogEl.innerHTML = "";
-  initBoard(); renderBoard();
+// UI & button
+btnFind.addEventListener('click', async ()=>{
+  btnFind.disabled = true;
+  btnFind.innerText = 'マッチング中...';
+  // Try to find an existing waiting first -> if none, become initiator
+  const res = await postToGAS({action:'checkWaiting'});
+  if(res.status==='found'){
+    // joiner flow
+    await joinRandomMatch();
+    btnFind.innerText = '接続完了';
+    btnFind.disabled = false;
+    myColor = 'b';
+    myTurn = false;
+    initBoardFromStart();
+    updateTurnUI();
+  } else {
+    // initiator flow
+    await findRandomMatch();
+    btnFind.innerText = '接続待機中';
+    btnFind.disabled = false;
+    myColor = 'w';
+    myTurn = true;
+    initBoardFromStart();
+    updateTurnUI();
+  }
 });
 
-// --------- Boot ---------
-initBoard();
-renderBoard();
-setConnState("未接続");
-setTurnDisplay();
+// helper to update UI whose turn
+function updateTurnUI(){
+  turnText.innerText = myTurn ? (myColor==='w' ? '白（あなた）' : '黒（あなた）') : (myColor==='w' ? '白（相手）' : '黒（相手）');
+}
+
+// when datachannel opens for initiator, send meta and set colors
+function attachInitiatorMeta(){
+  sendAfterChannelOpen({t:'meta', meta: {name:'匿名_init'}});
+  myColor = 'w'; myTurn = true; updateTurnUI();
+}
+
+// Initialize
+initBoardFromStart();
+
+// Watch for connection & set initiator meta when DC opens
+(function watchDC(){
+  setInterval(()=>{
+    if(dataChannel && dataChannel.readyState === 'open'){
+      if(!remoteMeta) {
+        // exchange meta
+        sendAfterChannelOpen({t:'meta', meta: {name:'あなたの相手'}});
+      }
+      // if we are initiator and haven't set color, do so
+      if(myColor === null){
+        myColor = 'w';
+        myTurn = true;
+        updateTurnUI();
+      }
+    }
+  }, 800);
+})();
