@@ -1,43 +1,49 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>P2P Light Chess — Random Match</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>P2P Chess</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- PeerJS (WebRTC) -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <!-- chess.js (rules) -->
+  <script src="https://cdn.jsdelivr.net/npm/chess.js@1.0.0/chess.min.js"></script>
 </head>
 <body>
-  <div id="app">
-    <header>
-      <h1>P2P Chess &mdash; ランダムマッチ</h1>
-      <div class="meta">
-        <div id="status">Status: <span id="statusText">待機中</span></div>
-        <div id="turn">手番: <span id="turnText">—</span></div>
+  <header class="app-header">
+    <h1>P2P Chess</h1>
+    <div class="status-bar">
+      <div><strong>あなた:</strong> <span id="self-id">—</span></div>
+      <div><strong>相手:</strong> <span id="opponent-id">—</span></div>
+      <div><strong>マッチ:</strong> <span id="match-id">—</span></div>
+      <div><strong>手番:</strong> <span id="turn-indicator">—</span></div>
+    </div>
+    <button id="find-match" class="primary">ランダムマッチ開始</button>
+  </header>
+
+  <main class="board-container">
+    <div id="board" class="board"></div>
+    <aside class="sidebar">
+      <div class="panel">
+        <h2>ゲーム情報</h2>
+        <div id="game-status">待機中…</div>
       </div>
-    </header>
-
-    <main>
-      <div id="boardWrap">
-        <div id="board"></div>
+      <div class="panel">
+        <h2>直近の手</h2>
+        <ul id="moves-log"></ul>
       </div>
+      <div class="panel">
+        <h2>操作</h2>
+        <button id="resign" class="danger">投了</button>
+        <button id="restart" class="secondary">再戦</button>
+      </div>
+    </aside>
+  </main>
 
-      <aside id="rightPanel">
-        <button id="btnFind">ランダムマッチを探す / 開始</button>
-        <div class="log">
-          <h3>ログ</h3>
-          <div id="log"></div>
-        </div>
-        <div class="info">
-          <h3>対戦情報</h3>
-          <div id="peerInfo">未接続</div>
-        </div>
-      </aside>
-    </main>
-
-    <footer>
-      <small>ルール: クイーンが取られたら負け（チェックメイトは判定しません）。</small>
-    </footer>
-  </div>
+  <footer class="footer">
+    <small>Web P2P Chess — GAS + Spreadsheet + PeerJS + chess.js</small>
+  </footer>
 
   <script src="app.js"></script>
 </body>
