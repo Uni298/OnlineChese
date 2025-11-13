@@ -1,50 +1,54 @@
-<!DOCTYPE html>
+<!-- index.html -->
+<!doctype html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>P2P Chess</title>
-  <link rel="stylesheet" href="styles.css" />
-  <!-- PeerJS (WebRTC) -->
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-  <!-- chess.js (rules) -->
+  <title>P2P Chess — Random Match</title>
+  <link rel="stylesheet" href="./style.css" />
+  <!-- PeerJS CDN -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- chess.js CDN (ES module friendly via window.CHESS) -->
   <script src="https://cdn.jsdelivr.net/npm/chess.js@1.0.0/chess.min.js"></script>
 </head>
 <body>
-  <header class="app-header">
-    <h1>P2P Chess</h1>
-    <div class="status-bar">
-      <div><strong>あなた:</strong> <span id="self-id">—</span></div>
-      <div><strong>相手:</strong> <span id="opponent-id">—</span></div>
-      <div><strong>マッチ:</strong> <span id="match-id">—</span></div>
-      <div><strong>手番:</strong> <span id="turn-indicator">—</span></div>
-    </div>
-    <button id="find-match" class="primary">ランダムマッチ開始</button>
-  </header>
-
-  <main class="board-container">
-    <div id="board" class="board"></div>
-    <aside class="sidebar">
-      <div class="panel">
-        <h2>ゲーム情報</h2>
-        <div id="game-status">待機中…</div>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">P2P Chess</div>
+      <div class="status">
+        <span id="connStatus" class="badge">接続準備中...</span>
+        <span id="roleBadge" class="badge">—</span>
+        <span id="turnBadge" class="badge">—</span>
       </div>
-      <div class="panel">
-        <h2>直近の手</h2>
-        <ul id="moves-log"></ul>
-      </div>
-      <div class="panel">
-        <h2>操作</h2>
-        <button id="resign" class="danger">投了</button>
-        <button id="restart" class="secondary">再戦</button>
-      </div>
-    </aside>
-  </main>
+    </header>
 
-  <footer class="footer">
-    <small>Web P2P Chess — GAS + Spreadsheet + PeerJS + chess.js</small>
-  </footer>
+    <main class="main">
+      <section class="left">
+        <div id="board" class="board"></div>
+        <div class="controls">
+          <button id="findMatchBtn" class="btn">ランダムマッチ開始</button>
+          <button id="resetBtn" class="btn btn-secondary">リセット</button>
+        </div>
+      </section>
 
-  <script src="app.js"></script>
+      <section class="right">
+        <div class="panel">
+          <h3>対戦情報</h3>
+          <div class="info-grid">
+            <div><strong>あなたのID:</strong> <span id="myId">—</span></div>
+            <div><strong>相手のID:</strong> <span id="opponentId">—</span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>ログ</h3>
+          <div id="log" class="log"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">Queen capture = lose. Legal moves only. P2P via PeerJS.</footer>
+  </div>
+
+  <script src="./app.js" type="module"></script>
 </body>
 </html>
