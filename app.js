@@ -1,322 +1,397 @@
-// ======== 設定 ========
-const GAS_BASE_URL = 'https://script.google.com/macros/s/AKfycbzTk0qr0KXPigKMJ28opJj3QjxTtmJK3qPnM9yxZQoCW5H1-BuYs0UA6A3ogkUaF6NcBg/exec'; // ← 置き換え
-const USE_PEERJS_HOST = true; // trueならPeerJSクラウドに接続
-// =====================
+// app.js
+// P2P chess client: PeerJS + chess.js, random matchmaking, legal moves, queen capture loses, move animation
 
-const state = {
-  peer: null,
-  conn: null,
-  selfId: null,
-  opponentId: null,
-  matchId: null,
-  color: null, // 'white' or 'black'
-  chess: new Chess(),
-  selected: null,
-  boardEl: null,
-  isMyTurn: false,
-};
+const SERVER_BASE = (location.origin.includes('render.com') || location.hostname !== 'localhost')
+  ? location.origin
+  : 'http://localhost:10000'; // adjust if needed for local dev
 
-const squares = [];
+const PEER_PATH = '/peerjs/peer'; // as mounted in server.js
+
+// UI elements
+const boardEl = document.getElementById('board');
+const connStatusEl = document.getElementById('connStatus');
+const roleBadgeEl = document.getElementById('roleBadge');
+const turnBadgeEl = document.getElementById('turnBadge');
+const myIdEl = document.getElementById('myId');
+const opponentIdEl = document.getElementById('opponentId');
+const logEl = document.getElementById('log');
+const findMatchBtn = document.getElementById('findMatchBtn');
+const resetBtn = document.getElementById('resetBtn');
+
+// Chess state
+const chess = new window.Chess(); // chess.js
+let myColor = null; // 'w' or 'b'
+let peer = null;
+let conn = null;
+let myPeerId = null;
+let opponentPeerId = null;
+
+// Board rendering model
 const files = ['a','b','c','d','e','f','g','h'];
+const ranks = ['1','2','3','4','5','6','7','8'];
+const SQUARE_SIZE = 62.5;
+const pieceElBySquare = new Map();
+let selectedSquare = null;
+let legalTargets = new Set();
 
-document.addEventListener('DOMContentLoaded', () => {
-  state.boardEl = document.getElementById('board');
-  buildBoard();
-  updateBoard();
-  bindUI();
-  updateTurnIndicator();
-});
-
-function bindUI() {
-  document.getElementById('find-match').addEventListener('click', startRandomMatch);
-  document.getElementById('resign').addEventListener('click', () => {
-    if (!state.conn) return;
-    sendMessage({ type: 'resign' });
-    endGame('投了しました。あなたの負けです。');
-  });
-  document.getElementById('restart').addEventListener('click', () => {
-    location.reload();
-  });
+// Helpers
+function log(msg) {
+  const line = document.createElement('div');
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.prepend(line);
 }
 
-function buildBoard() {
-  state.boardEl.innerHTML = '';
-  squares.length = 0;
-  for (let r = 8; r >= 1; r--) {
-    for (let c = 1; c <= 8; c++) {
-      const sq = files[c-1] + r;
+function setConnStatus(text, color='') {
+  connStatusEl.textContent = text;
+  connStatusEl.style.borderColor = color || '#e5e7eb';
+}
+
+function setRoleBadge(text) {
+  roleBadgeEl.textContent = text;
+}
+function setTurnBadge(text) {
+  turnBadgeEl.textContent = text;
+}
+
+function algebraicToXY(sq) {
+  const f = files.indexOf(sq[0]);
+  const r = ranks.indexOf(sq[1]);
+  return { x: f, y: r };
+}
+
+function squareTopLeft(sq) {
+  const { x, y } = algebraicToXY(sq);
+  // White at bottom: rank 1 at bottom visually
+  const top = (7 - y) * SQUARE_SIZE;
+  const left = x * SQUARE_SIZE;
+  return { top, left };
+}
+
+function createSquares() {
+  boardEl.innerHTML = '';
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const sq = files[f] + ranks[r];
       const el = document.createElement('div');
-      el.className = `square ${(r+c)%2===0 ? 'dark' : 'light'}`;
+      el.className = 'square ' + (((r + f) % 2 === 0) ? 'light' : 'dark');
+      el.style.top = (7 - r) * SQUARE_SIZE + 'px';
+      el.style.left = f * SQUARE_SIZE + 'px';
       el.dataset.square = sq;
+
+      const coord = document.createElement('div');
+      coord.className = 'square coord';
+      coord.textContent = sq;
+      el.appendChild(coord);
+
       el.addEventListener('click', () => onSquareClick(sq));
-      state.boardEl.appendChild(el);
-      squares.push(el);
+
+      boardEl.appendChild(el);
     }
   }
+}
+
+function pieceEmoji(piece) {
+  const map = {
+    w: { k: '♔', q: '♕', r: '♖', b: '♗', n: '♘', p: '♙' },
+    b: { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' },
+  };
+  return map[piece.color][piece.type];
 }
 
 function renderPieces() {
-  squares.forEach(el => el.innerHTML = '');
-  const board = state.chess.board();
-  // chess.js returns ranks from 8->1
-  for (let r = 8; r >= 1; r--) {
-    for (let c = 1; c <= 8; c++) {
-      const sq = files[c-1] + r;
-      const piece = state.chess.get(sq);
-      if (piece) {
-        const span = document.createElement('span');
-        span.className = 'piece';
-        span.textContent = toUnicode(piece);
-        squares.find(s => s.dataset.square === sq).appendChild(span);
-      }
+  // Remove existing
+  for (const el of pieceElBySquare.values()) el.remove();
+  pieceElBySquare.clear();
+
+  const board = chess.board();
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const piece = board[r][f];
+      if (!piece) continue;
+      const sq = files[f] + ranks[r];
+      const el = document.createElement('div');
+      el.className = `piece ${piece.color}`;
+      el.textContent = pieceEmoji(piece);
+      const { top, left } = squareTopLeft(sq);
+      el.style.transform = `translate(${left + 1}px, ${top + 1}px)`;
+      el.dataset.square = sq;
+      el.dataset.color = piece.color;
+      el.dataset.type = piece.type;
+
+      el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        onPieceSelect(sq);
+      });
+
+      boardEl.appendChild(el);
+      pieceElBySquare.set(sq, el);
     }
   }
 }
 
-function updateBoard() {
-  renderPieces();
-  updateGameStatus();
-  updateTurnIndicator();
+function highlightSquares(sqs) {
+  // Clear
+  document.querySelectorAll('.square.highlight').forEach(el => el.classList.remove('highlight'));
+  sqs.forEach(sq => {
+    const targetEl = [...document.querySelectorAll('.square')].find(el => el.dataset.square === sq);
+    if (targetEl) targetEl.classList.add('highlight');
+  });
 }
 
-function toUnicode(p) {
-  const map = {
-    'p': '♟', 'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚',
-    'P': '♙', 'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔'
-  };
-  return map[p.type === p.type.toLowerCase() ? p.type : p.type.toUpperCase()];
+function onPieceSelect(sq) {
+  if (!myColor) return;
+  const piece = chess.get(sq);
+  if (!piece || piece.color !== myColor) return;
+  selectedSquare = sq;
+
+  const moves = chess.moves({ square: sq, verbose: true });
+  legalTargets = new Set(moves.map(m => m.to));
+  highlightSquares([sq, ...legalTargets]);
 }
 
 function onSquareClick(sq) {
-  if (!state.conn || !state.isMyTurn) return;
+  if (!myColor) return;
 
-  if (!state.selected) {
-    // select a piece if present and ours
-    const piece = state.chess.get(sq);
-    if (!piece) return;
-    const turnColor = state.chess.turn() === 'w' ? 'white' : 'black';
-    const pieceColor = piece.color === 'w' ? 'white' : 'black';
-    if (turnColor !== state.color || pieceColor !== state.color) return;
-    state.selected = sq;
-    highlightMoves(sq);
-  } else {
-    const move = tryMove(state.selected, sq);
-    clearHighlights();
-    state.selected = null;
-    if (move) {
-      animateMove(move.from, move.to);
-      logMove(move);
-      sendMessage({ type: 'move', moveSAN: move.san, from: move.from, to: move.to });
-      checkQueenCaptureEnd(move);
-      updateBoard();
-      state.isMyTurn = false;
-      updateTurnIndicator();
-    }
-  }
-}
-
-function highlightMoves(from) {
-  clearHighlights();
-  const moves = state.chess.moves({ square: from, verbose: true });
-  moves.forEach(m => {
-    const el = squares.find(s => s.dataset.square === m.to);
-    if (el) el.classList.add('highlight');
-  });
-  const fromEl = squares.find(s => s.dataset.square === from);
-  if (fromEl) fromEl.classList.add('highlight');
-}
-
-function clearHighlights() {
-  squares.forEach(s => s.classList.remove('highlight'));
-}
-
-function tryMove(from, to) {
-  const move = state.chess.move({ from, to, promotion: 'q' });
-  if (!move) return null;
-  return move;
-}
-
-function animateMove(from, to) {
-  const fromEl = squares.find(s => s.dataset.square === from);
-  const toEl = squares.find(s => s.dataset.square === to);
-  const pieceEl = fromEl?.querySelector('.piece');
-  if (!fromEl || !toEl || !pieceEl) return;
-  pieceEl.classList.add('moving');
-  setTimeout(() => pieceEl.classList.remove('moving'), 250);
-}
-
-function logMove(move) {
-  const li = document.createElement('li');
-  li.textContent = `${state.isMyTurn ? 'あなた' : '相手'}: ${move.from} → ${move.to} (${move.san})`;
-  document.getElementById('moves-log').prepend(li);
-}
-
-function updateGameStatus() {
-  const statusEl = document.getElementById('game-status');
-  if (!state.conn) {
-    statusEl.textContent = 'P2P接続待機中…';
+  // Allow deselect
+  if (selectedSquare && selectedSquare === sq) {
+    selectedSquare = null;
+    legalTargets.clear();
+    highlightSquares([]);
     return;
   }
-  if (state.chess.in_checkmate()) {
-    statusEl.textContent = 'チェックメイト！';
-  } else if (state.chess.in_check()) {
-    statusEl.textContent = 'チェック！';
-  } else {
-    statusEl.textContent = '進行中';
+
+  if (!selectedSquare) {
+    onPieceSelect(sq);
+    return;
   }
+
+  if (!legalTargets.has(sq)) return; // only legal moves allowed
+
+  const move = chess.move({ from: selectedSquare, to: sq, promotion: 'q' });
+  if (!move) return;
+
+  selectedSquare = null;
+  legalTargets.clear();
+  highlightSquares([]);
+
+  animateMove(move.from, move.to, () => {
+    renderPieces();
+    afterMoveEffects(move, true);
+    broadcastMove(move);
+  });
 }
 
-function updateTurnIndicator() {
-  const turnEl = document.getElementById('turn-indicator');
-  const turnColor = state.chess.turn() === 'w' ? 'white' : 'black';
-  const isMyTurnNow = (state.color === turnColor) && !!state.conn;
-  state.isMyTurn = isMyTurnNow;
-  turnEl.textContent = isMyTurnNow ? 'あなたの番' : '相手の番';
+function animateMove(from, to, onDone) {
+  const pieceEl = pieceElBySquare.get(from);
+  if (!pieceEl) { onDone?.(); return; }
+  pieceEl.classList.add('dragging');
+  const { left: toLeft, top: toTop } = squareTopLeft(to);
+  pieceEl.style.transform = `translate(${toLeft + 1}px, ${toTop + 1}px)`;
+  setTimeout(() => {
+    pieceEl.classList.remove('dragging');
+    onDone?.();
+  }, 240);
 }
 
-// Queen capture sudden-death
-function checkQueenCaptureEnd(move) {
-  if (move.captured && move.captured.toLowerCase() === 'q') {
-    const winner = state.isMyTurn ? 'あなた' : '相手';
-    endGame(`クイーンが取られました。${winner}の勝ちです。`);
+function broadcastMove(move) {
+  if (!conn || conn.open !== true) return;
+  conn.send({ type: 'move', move });
+  setTurnBadge('相手の番');
+  log(`あなた: ${move.from} → ${move.to}${move.captured ? `（${move.captured}捕獲）` : ''}`);
+}
+
+function afterMoveEffects(move, isLocal) {
+  // Turn badge
+  const turnColor = chess.turn(); // whose turn next
+  setTurnBadge(turnColor === myColor ? 'あなたの番' : '相手の番');
+
+  // Queen capture = instant loss for the captured side
+  if (move.captured === 'q') {
+    const loser = (isLocal ? '相手' : 'あなた');
+    log(`クイーン捕獲！${loser}の敗北`);
+    endGame(`${loser}の敗北（クイーン捕獲）`);
+  }
+
+  // Checkmate detection fallback (not required, but informative)
+  if (chess.game_over()) {
+    if (chess.in_checkmate()) {
+      log('チェックメイト！');
+    } else if (chess.in_stalemate()) {
+      log('ステイルメイト');
+    } else if (chess.insufficient_material()) {
+      log('引き分け（駒不足）');
+    }
   }
 }
 
 function endGame(message) {
-  document.getElementById('game-status').textContent = message;
-  state.isMyTurn = false;
+  setConnStatus(message, '#ef4444');
+  // Disable inputs by clearing selection and legal targets
+  selectedSquare = null;
+  legalTargets.clear();
+  highlightSquares([]);
+  // Prevent further moves by nulling myColor
+  myColor = null;
 }
 
-// ======== P2P & Matchmaking ========
+function initPeer() {
+  myPeerId = `p${Math.random().toString(36).slice(2, 10)}`;
+  myIdEl.textContent = myPeerId;
 
-async function startRandomMatch() {
-  document.getElementById('find-match').disabled = true;
-  setStatus('ランダムマッチング中…');
+  peer = new Peer(myPeerId, {
+    host: new URL(SERVER_BASE).hostname,
+    port: new URL(SERVER_BASE).port || (SERVER_BASE.startsWith('https') ? 443 : 80),
+    path: '/peerjs/peer',
+    secure: SERVER_BASE.startsWith('https'),
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
+      ],
+    },
+  });
 
-  // 1) まずPeerを作成
-  await createPeer();
+  peer.on('open', () => {
+    setConnStatus('接続待機中', '#2563eb');
+    log('PeerJS open');
+  });
 
-  // 2) GASへ登録＆ペアリング要求
-  const res = await callGAS('match', { playerId: state.selfId });
-  if (!res || !res.ok) {
-    setStatus('マッチングに失敗しました');
+  peer.on('connection', (c) => {
+    conn = c;
+    opponentPeerId = c.peer;
+    opponentIdEl.textContent = opponentPeerId;
+
+    conn.on('open', () => {
+      decideColors();
+      setConnStatus('対戦相手に接続', '#10b981');
+      setTurnBadge(chess.turn() === myColor ? 'あなたの番' : '相手の番');
+      log(`接続: ${myPeerId} ⇄ ${opponentPeerId}`);
+      conn.send({ type: 'hello', id: myPeerId });
+    });
+
+    conn.on('data', onData);
+    conn.on('close', () => {
+      setConnStatus('接続が切断されました', '#ef4444');
+      log('接続が切断');
+    });
+  });
+
+  peer.on('error', (err) => {
+    setConnStatus('エラー', '#ef4444');
+    log(`Peer error: ${err.type || err}`);
+  });
+}
+
+function connectToOpponent(id) {
+  opponentPeerId = id;
+  opponentIdEl.textContent = opponentPeerId;
+  conn = peer.connect(opponentPeerId, { reliable: true });
+  conn.on('open', () => {
+    decideColors();
+    setConnStatus('対戦相手に接続', '#10b981');
+    setTurnBadge(chess.turn() === myColor ? 'あなたの番' : '相手の番');
+    log(`接続: ${myPeerId} → ${opponentPeerId}`);
+    conn.send({ type: 'hello', id: myPeerId });
+  });
+  conn.on('data', onData);
+  conn.on('close', () => {
+    setConnStatus('接続が切断されました', '#ef4444');
+    log('接続が切断');
+  });
+}
+
+function decideColors() {
+  // Deterministic: lexicographically smaller ID is white
+  const [wId, bId] = [myPeerId, opponentPeerId].sort();
+  myColor = (myPeerId === wId) ? 'w' : 'b';
+  setRoleBadge(myColor === 'w' ? 'あなた：白' : 'あなた：黒');
+}
+
+function onData(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  if (payload.type === 'hello') {
+    log(`相手とハンドシェイク: ${payload.id}`);
+  }
+  if (payload.type === 'move') {
+    const move = payload.move;
+    const ok = chess.move(move);
+    if (!ok) {
+      log('相手の不正手を受信（無視）');
+      return;
+    }
+    animateMove(move.from, move.to, () => {
+      renderPieces();
+      afterMoveEffects(move, false);
+      setTurnBadge('あなたの番');
+      log(`相手: ${move.from} → ${move.to}${move.captured ? `（${move.captured}捕獲）` : ''}`);
+    });
+  }
+}
+
+// Matchmaking
+async function startMatchmaking() {
+  setConnStatus('ランダムマッチ検索中...', '#2563eb');
+  log('マッチング登録');
+  await fetch(`${SERVER_BASE}/match/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ peerId: myPeerId }),
+  }).catch(() => {});
+
+  const poll = async () => {
+    try {
+      const res = await fetch(`${SERVER_BASE}/match/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peerId: myPeerId }),
+      });
+      const data = await res.json();
+      if (data.status === 'paired' && data.opponentId) {
+        connectToOpponent(data.opponentId);
+        return true;
+      }
+    } catch (e) {
+      log('マッチングエラー（再試行）');
+    }
+    return false;
+  };
+
+  const interval = setInterval(async () => {
+    const done = await poll();
+    if (done) clearInterval(interval);
+  }, 1500);
+}
+
+// Reset
+function resetGame() {
+  chess.reset();
+  selectedSquare = null;
+  legalTargets.clear();
+  highlightSquares([]);
+  renderPieces();
+  setTurnBadge(chess.turn() === myColor ? 'あなたの番' : '相手の番');
+  setConnStatus('ゲームをリセット', '#2563eb');
+  log('ゲームをリセット');
+}
+
+function initBoard() {
+  createSquares();
+  renderPieces();
+}
+
+// Wire UI
+findMatchBtn.addEventListener('click', () => {
+  if (!peer || !peer.open) {
+    log('Peer未準備。少し待って再試行してください。');
     return;
   }
+  startMatchmaking();
+});
 
-  state.matchId = res.matchId;
-  state.color = res.color; // 'white' or 'black'
-  state.opponentId = res.opponentPeerId || null;
+resetBtn.addEventListener('click', resetGame);
 
-  document.getElementById('self-id').textContent = state.selfId;
-  document.getElementById('match-id').textContent = state.matchId;
-
-  // 3) 相手IDが既に分かっていれば接続、なければ待受
-  if (state.opponentId) {
-    connectToPeer(state.opponentId);
-  } else {
-    waitForOpponent();
-  }
-
-  // ボードの向き（白は8->1、黒は1->8視点）
-  applyOrientation(state.color);
-  setStatus(`接続待機中… あなたは${state.color === 'white' ? '白' : '黒'}`);
-  updateTurnIndicator();
-}
-
-function applyOrientation(color) {
-  if (color === 'black') {
-    // 反転表示: CSSグリッドの順序を逆に構成し直す
-    state.boardEl.innerHTML = '';
-    squares.length = 0;
-    for (let r = 1; r <= 8; r++) {
-      for (let c = 8; c >= 1; c--) {
-        const sq = files[c-1] + r;
-        const el = document.createElement('div');
-        el.className = `square ${(r+c)%2===0 ? 'dark' : 'light'}`;
-        el.dataset.square = sq;
-        el.addEventListener('click', () => onSquareClick(sq));
-        state.boardEl.appendChild(el);
-        squares.push(el);
-      }
-    }
-    updateBoard();
-  }
-}
-
-function setStatus(text) {
-  document.getElementById('game-status').textContent = text;
-}
-
-function createPeer() {
-  return new Promise((resolve, reject) => {
-    const peer = new Peer(undefined, USE_PEERJS_HOST ? {
-      debug: 2
-    } : {});
-    state.peer = peer;
-    peer.on('open', id => {
-      state.selfId = id;
-      resolve();
-    });
-    peer.on('error', err => {
-      console.error(err);
-      reject(err);
-    });
-  });
-}
-
-function waitForOpponent() {
-  state.peer.on('connection', conn => {
-    setupConnection(conn);
-  });
-}
-
-function connectToPeer(opponentId) {
-  const conn = state.peer.connect(opponentId, { reliable: true });
-  setupConnection(conn);
-}
-
-function setupConnection(conn) {
-  state.conn = conn;
-  document.getElementById('opponent-id').textContent = conn.peer;
-  conn.on('open', () => {
-    setStatus('接続しました。ゲーム開始！');
-    // 初期同期
-    conn.send({ type: 'hello', matchId: state.matchId, color: state.color });
-    updateTurnIndicator();
-  });
-  conn.on('data', msg => handleMessage(msg));
-  conn.on('close', () => setStatus('接続が切断されました'));
-}
-
-function sendMessage(payload) {
-  if (!state.conn || state.conn.open !== true) return;
-  state.conn.send(payload);
-}
-
-function handleMessage(msg) {
-  if (msg.type === 'hello') {
-    // peer handshake
-    // no-op
-  } else if (msg.type === 'move') {
-    const move = state.chess.move({ from: msg.from, to: msg.to, promotion: 'q' });
-    if (move) {
-      animateMove(msg.from, msg.to);
-      logMove(move);
-      checkQueenCaptureEnd(move);
-      updateBoard();
-      state.isMyTurn = true;
-      updateTurnIndicator();
-    }
-  } else if (msg.type === 'resign') {
-    endGame('相手が投了しました。あなたの勝ちです。');
-  }
-}
-
-// ======== GAS呼び出し ========
-
-async function callGAS(action, data) {
-  const params = new URLSearchParams({ action, ...data });
-  const url = `${GAS_BASE_URL}?${params.toString()}`;
-  const res = await fetch(url, { method: 'GET' });
-  return res.ok ? res.json() : null;
-}
+// Bootstrap
+initBoard();
+initPeer();
+setRoleBadge('未割り当て');
+setTurnBadge('—');
