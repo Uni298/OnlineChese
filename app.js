@@ -1,9 +1,7 @@
 // app.js
 // P2P chess client: PeerJS + chess.js, random matchmaking, legal moves, queen capture loses, move animation
 
-const SERVER_BASE = (location.origin.includes('render.com') || location.hostname !== 'localhost')
-  ? location.origin
-  : 'http://localhost:10000'; // adjust if needed for local dev
+const SERVER_BASE = "https://onlinechese.onrender.com";
 
 const PEER_PATH = '/peerjs/peer'; // as mounted in server.js
 
