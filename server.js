@@ -72,11 +72,21 @@ io.on('connection', (socket) => {
     // 現在のプレイヤーを確認
     const playerColor = game.players[0] === socket.id ? 'white' : 'black';
     if (playerColor !== game.currentPlayer) return;
-    
+
     // 駒の移動を実行
-    const piece = game.board[from.row][from.col];
-    game.board[from.row][from.col] = '';
-    game.board[to.row][to.col] = piece;
+let piece = game.board[from.row][from.col];
+
+// ポーンのプロモーションをチェック
+if (piece.toLowerCase() === 'p') {
+    const promotionRow = playerColor === 'white' ? 0 : 7;
+    if (to.row === promotionRow) {
+        // クイーンに自動で昇格
+        piece = playerColor === 'white' ? 'Q' : 'q';
+    }
+}
+
+game.board[from.row][from.col] = '';
+game.board[to.row][to.col] = piece;
     
     // 移動履歴を保存
     game.moves.push({ from, to, piece });
