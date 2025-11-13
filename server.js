@@ -91,14 +91,14 @@ game.board[to.row][to.col] = piece;
     // 移動履歴を保存
     game.moves.push({ from, to, piece });
     
-    // クイーンが取られたかチェック
+    // Kingが取られたかチェック
     let whiteQueenExists = false;
     let blackQueenExists = false;
     
     for (let row = 0; row < 8; row++) {
       for (let col = 0; col < 8; col++) {
-        if (game.board[row][col] === 'Q') whiteQueenExists = true;
-        if (game.board[row][col] === 'q') blackQueenExists = true;
+        if (game.board[row][col] === 'K') whiteQueenExists = true;
+        if (game.board[row][col] === 'k') blackQueenExists = true;
       }
     }
     
