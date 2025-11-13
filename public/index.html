@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Online Chess - Random Match</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Socket.IO -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- chess.js (client) -->
+  <script src="https://cdn.jsdelivr.net/npm/chess.js@1.0.0/dist/chess.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">Bright Chess</div>
+      <button id="findBtn" class="primary">ランダムマッチ開始</button>
+    </header>
+
+    <main class="layout">
+      <section class="board-section">
+        <div id="statusBar" class="status">
+          <span id="roleLabel">未参加</span>
+          <span id="turnLabel">手番: -</span>
+          <span id="lastMoveLabel">前手: -</span>
+        </div>
+        <div id="board" class="board"></div>
+      </section>
+
+      <aside class="side">
+        <div class="card">
+          <h2>試合情報</h2>
+          <div class="info-row">
+            <span class="label">ゲームID:</span><span id="gameId">-</span>
+          </div>
+          <div class="info-row">
+            <span class="label">あなたの色:</span><span id="myColor">-</span>
+          </div>
+          <div class="info-row">
+            <span class="label">状態:</span><span id="gameStatus">待機中</span>
+          </div>
+          <div class="divider"></div>
+          <div class="tip">
+            クイーンが取られた瞬間に負け（サドンデス）。合法手のみ、移動アニメーションあり。
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="client.js"></script>
+</body>
+</html>
