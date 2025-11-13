@@ -1,135 +1,128 @@
-// server.js
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
-const { Chess } = require('chess.js');
+const socketIo = require('socket.io');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = socketIo(server);
 
-app.use(express.static('public')); // serve index.html, client.js, styles.css from /public
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Simple queue-based random matchmaking
-let waitingPlayer = null;
-const games = new Map(); // gameId -> { chess, players: {white, black}, lastMove, status }
+// ゲームの状態を管理
+const games = new Map();
+const waitingPlayers = [];
 
-function createGame(playerA, playerB) {
-  const gameId = `g_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  // random colors
-  const white = Math.random() < 0.5 ? playerA : playerB;
-  const black = white === playerA ? playerB : playerA;
-
-  const chess = new Chess();
-  games.set(gameId, {
-    chess,
-    players: { white, black },
-    lastMove: null,
-    status: 'playing'
-  });
-
-  white.join(gameId);
-  black.join(gameId);
-
-  io.to(gameId).emit('game:start', {
-    gameId,
-    fen: chess.fen(),
-    turn: chess.turn(), // 'w' or 'b'
-    colors: {
-      [white.id]: 'w',
-      [black.id]: 'b'
-    }
-  });
-}
+// チェスの初期設定
+const initialBoard = [
+  ['r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'],
+  ['p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'],
+  ['', '', '', '', '', '', '', ''],
+  ['', '', '', '', '', '', '', ''],
+  ['', '', '', '', '', '', '', ''],
+  ['', '', '', '', '', '', '', ''],
+  ['P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'],
+  ['R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R']
+];
 
 io.on('connection', (socket) => {
-  socket.emit('lobby:connected', { id: socket.id });
+  console.log('ユーザーが接続しました:', socket.id);
 
-  // Enter matchmaking
-  socket.on('lobby:findMatch', () => {
-    if (waitingPlayer && waitingPlayer.id !== socket.id) {
-      createGame(waitingPlayer, socket);
-      waitingPlayer = null;
-    } else {
-      waitingPlayer = socket;
-      socket.emit('lobby:waiting');
-    }
-  });
+  // マッチメイキング
+  if (waitingPlayers.length > 0) {
+    const player1 = waitingPlayers.pop();
+    const player2 = socket.id;
+    
+    const gameId = `game_${Date.now()}`;
+    const game = {
+      id: gameId,
+      players: [player1, player2],
+      board: JSON.parse(JSON.stringify(initialBoard)),
+      currentPlayer: 'white', // whiteが先手
+      moves: []
+    };
+    
+    games.set(gameId, game);
+    
+    // 両プレイヤーにゲーム開始を通知
+    io.to(player1).emit('gameStart', { 
+      gameId, 
+      color: 'white',
+      board: game.board 
+    });
+    io.to(player2).emit('gameStart', { 
+      gameId, 
+      color: 'black',
+      board: game.board 
+    });
+    
+    console.log(`ゲーム開始: ${gameId}`);
+  } else {
+    waitingPlayers.push(socket.id);
+    socket.emit('waiting', { message: '対戦相手を待っています...' });
+  }
 
-  // Handle moves
-  socket.on('game:move', ({ gameId, from, to, promotion }) => {
+  // 駒の移動
+  socket.on('move', (data) => {
+    const { gameId, from, to } = data;
     const game = games.get(gameId);
-    if (!game || game.status !== 'playing') return;
-
-    const { chess, players } = game;
-    const myColor = players.white.id === socket.id ? 'w' :
-                    players.black.id === socket.id ? 'b' : null;
-    if (!myColor) return;
-
-    if (chess.turn() !== myColor) {
-      socket.emit('game:error', { message: 'Not your turn.' });
-      return;
-    }
-
-    const move = chess.move({ from, to, promotion: promotion || 'q' });
-    if (!move) {
-      socket.emit('game:error', { message: 'Illegal move.' });
-      return;
-    }
-
-    game.lastMove = { from, to, san: move.san };
-
-    // Queen capture sudden death rule
-    const captured = move.captured;
-    const capturedPieceIsQueen = captured === 'q';
-    let winner = null;
-    if (capturedPieceIsQueen) {
-      // If black queen captured, black loses; if white queen captured, white loses
-      winner = (move.color === 'w') ? 'w' : 'b'; // mover captured opponent's queen
-      game.status = 'ended';
-    }
-
-    // Regular checkmate/stalemate also ends the game (for integrity)
-    if (chess.isGameOver() && game.status !== 'ended') {
-      game.status = 'ended';
-      if (chess.isCheckmate()) {
-        winner = chess.turn() === 'w' ? 'b' : 'w'; // side who just moved delivered mate
-      } else {
-        winner = 'draw';
+    
+    if (!game || !game.players.includes(socket.id)) return;
+    
+    // 現在のプレイヤーを確認
+    const playerColor = game.players[0] === socket.id ? 'white' : 'black';
+    if (playerColor !== game.currentPlayer) return;
+    
+    // 駒の移動を実行
+    const piece = game.board[from.row][from.col];
+    game.board[from.row][from.col] = '';
+    game.board[to.row][to.col] = piece;
+    
+    // 移動履歴を保存
+    game.moves.push({ from, to, piece });
+    
+    // クイーンが取られたかチェック
+    let whiteQueenExists = false;
+    let blackQueenExists = false;
+    
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        if (game.board[row][col] === 'Q') whiteQueenExists = true;
+        if (game.board[row][col] === 'q') blackQueenExists = true;
       }
     }
-
-    io.to(gameId).emit('game:update', {
-      fen: chess.fen(),
-      turn: chess.turn(),
-      lastMove: game.lastMove,
-      status: game.status,
-      winner,
-      suddenDeath: capturedPieceIsQueen
+    
+    // ターンを交代
+    game.currentPlayer = game.currentPlayer === 'white' ? 'black' : 'white';
+    
+    // 全プレイヤーに更新を通知
+    game.players.forEach(playerId => {
+      io.to(playerId).emit('boardUpdate', {
+        board: game.board,
+        currentPlayer: game.currentPlayer,
+        lastMove: { from, to },
+        gameOver: !whiteQueenExists || !blackQueenExists,
+        winner: !whiteQueenExists ? 'black' : (!blackQueenExists ? 'white' : null)
+      });
     });
   });
 
   socket.on('disconnect', () => {
-    // Handle disconnection
-    if (waitingPlayer && waitingPlayer.id === socket.id) {
-      waitingPlayer = null;
+    console.log('ユーザーが切断しました:', socket.id);
+    
+    // 待機リストから削除
+    const waitingIndex = waitingPlayers.indexOf(socket.id);
+    if (waitingIndex > -1) {
+      waitingPlayers.splice(waitingIndex, 1);
     }
-    // End games where a player disconnects
-    for (const [gameId, game] of games.entries()) {
-      if (game.status === 'playing' &&
-          (game.players.white.id === socket.id || game.players.black.id === socket.id)) {
-        game.status = 'ended';
-        const winner = (game.players.white.id === socket.id) ? 'b' : 'w'; // the remaining player wins
-        io.to(gameId).emit('game:update', {
-          fen: game.chess.fen(),
-          turn: game.chess.turn(),
-          lastMove: game.lastMove,
-          status: game.status,
-          winner,
-          suddenDeath: false,
-          reason: 'opponent_disconnected'
-        });
-        io.socketsLeave(gameId); // clear room
+    
+    // ゲームから削除
+    for (let [gameId, game] of games) {
+      if (game.players.includes(socket.id)) {
+        const opponent = game.players.find(id => id !== socket.id);
+        if (opponent) {
+          io.to(opponent).emit('opponentDisconnected');
+        }
         games.delete(gameId);
       }
     }
@@ -137,6 +130,6 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`サーバーがポート ${PORT} で起動しました`);
 });
